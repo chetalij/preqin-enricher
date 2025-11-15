@@ -1,0 +1,1 @@
+This project automates country detection from addresses, formats phone numbers correctly, and sets firm currency based on HQ location. 
