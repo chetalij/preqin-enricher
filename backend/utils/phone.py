@@ -1,31 +1,28 @@
 import phonenumbers
-from phonenumbers import NumberParseException
-import pycountry
+from phonenumbers.phonenumberutil import NumberParseException
 
-def format_phone_for_country(raw_phone: str, country_iso: str | None):
+
+def format_phone_for_country(raw_phone: str | None, country_iso: str | None):
     """
-    Returns (formatted_international, valid_boolean)
+    Take a raw phone string and a 2-letter ISO country code (e.g. 'JP'),
+    and return (formatted_number, is_valid).
     """
     if not raw_phone:
         return None, False
 
-    # If we have a country ISO (alpha-2) like 'US', pass as default region
-    region = country_iso if country_iso else None
+    region = country_iso.upper() if country_iso else None
 
     try:
-        # Try parse with region (None falls back to strict parsing)
-        if region:
-            parsed = phonenumbers.parse(raw_phone, region)
-        else:
-            parsed = phonenumbers.parse(raw_phone, None)
-    except NumberParseException:
-        # Try removing some common characters and retry
-        cleaned = ''.join(ch for ch in raw_phone if ch.isdigit() or ch == '+')
-        try:
-            parsed = phonenumbers.parse(cleaned, region)
-        except Exception:
-            return raw_phone, False
+        # If region is None, phonenumbers will try to infer, but region helps a lot
+        parsed = phonenumbers.parse(raw_phone, region)
 
-    valid = phonenumbers.is_valid_number(parsed)
-    formatted = phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.INTERNATIONAL)
-    return formatted, valid
+        if not phonenumbers.is_valid_number(parsed):
+            return None, False
+
+        formatted = phonenumbers.format_number(
+            parsed, phonenumbers.PhoneNumberFormat.INTERNATIONAL
+        )
+        return formatted, True
+
+    except NumberParseException:
+        return None, False
