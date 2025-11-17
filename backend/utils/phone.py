@@ -13,15 +13,19 @@ def format_phone_for_country(raw_phone: str | None, country_iso: str | None):
     region = country_iso.upper() if country_iso else None
 
     try:
-        # If region is None, phonenumbers will try to infer, but region helps a lot
         parsed = phonenumbers.parse(raw_phone, region)
 
         if not phonenumbers.is_valid_number(parsed):
             return None, False
 
+        # Standard international format (e.g. "+81 3-1234-5678")
         formatted = phonenumbers.format_number(
             parsed, phonenumbers.PhoneNumberFormat.INTERNATIONAL
         )
+
+        # Replace hyphens with spaces: "+81 3 1234 5678"
+        formatted = formatted.replace("-", " ")
+
         return formatted, True
 
     except NumberParseException:
