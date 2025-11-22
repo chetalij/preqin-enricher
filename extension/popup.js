@@ -1,164 +1,411 @@
 // popup.js
+'use strict';
 
-// ---------------------------------------------------------
-// 1. RUN ENRICHMENT (sends data to backend)
-// ---------------------------------------------------------
-async function runEnrichment() {
-    const resultBox = document.getElementById("result");
+// ============================================================
+// Configuration
+// ============================================================
 
-    // Read values from popup input fields
-    const address_line = document.getElementById("address_line").value;
-    const city = document.getElementById("city").value;
-    const state = document.getElementById("state").value;
-    const postal_code = document.getElementById("postal_code").value;
-    const country = document.getElementById("country").value;
-    const phone = document.getElementById("phone").value;
+// FastAPI backend endpoint
+const BACKEND_URL = 'http://127.0.0.1:8000/enrich';
 
-    // Basic validation: at least something must be provided
-    if (!address_line && !city && !postal_code && !country && !phone) {
-        resultBox.textContent = "Please enter at least one field (address/phone).";
-        return;
+// In-memory state in the popup
+let hqSource = null;          // HQ data scraped from the page
+let hqEnriched = null;        // HQ data returned from the backend
+let altSources = [];          // Alternate office data scraped from the page
+let altEnriched = [];         // Alternate office enriched responses
+
+// ============================================================
+// Utility helpers (popup context)
+// ============================================================
+
+/**
+ * Append or replace status text in the popup "Status / Debug" box.
+ */
+function logStatus(message, append = true) {
+  const statusEl = document.getElementById('status');
+  if (!statusEl) return;
+
+  const time = new Date().toLocaleTimeString();
+  const line = `[${time}] ${message}`;
+
+  if (append) {
+    statusEl.textContent = statusEl.textContent
+      ? statusEl.textContent + '\n' + line
+      : line;
+  } else {
+    statusEl.textContent = line;
+  }
+}
+
+/**
+ * Get the currently active tab ID.
+ */
+function getActiveTabId(callback) {
+  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+    if (!tabs || !tabs.length) {
+      console.error('No active tab found.');
+      logStatus('ERROR: No active tab found.');
+      callback(null);
+      return;
     }
+    callback(tabs[0].id);
+  });
+}
 
-    const payload = {
-        firm_id: "test-from-popup",
-        hq: {
-            address_line,
-            city,
-            state,
-            postal_code,
-            country
-        },
-        alt_offices: [],
-        phone
+// ============================================================
+// Page-context functions (run inside test-form / CRM page)
+// ============================================================
+
+/**
+ * Runs inside the test form / CRM page.
+ *
+ * Reads:
+ *   HQ:
+ *     #hq_address
+ *     #hq_city
+ *     #hq_state
+ *     #hq_postal
+ *     #hq_country
+ *     #phone
+ *     #fax
+ *     #currency
+ *
+ *   Alternate offices:
+ *     .alt-office-block
+ *       .alt-office-country
+ *       .alt-office-phone
+ *       .alt-office-fax
+ *
+ * Returns: { hq, altOffices }
+ */
+function scrapeAllFromPage() {
+  const getVal = (selector) => {
+    const el = document.querySelector(selector);
+    if (!el) return '';
+    if (el.value !== undefined) return String(el.value).trim();
+    return (el.textContent || '').trim();
+  };
+
+  // ---- HQ ----
+  const addressSelector = '#hq_address';
+  const citySelector = '#hq_city';
+  const stateSelector = '#hq_state';
+  const postalSelector = '#hq_postal';
+  const countrySelector = '#hq_country';
+  const phoneSelector = '#phone';
+  const faxSelector = '#fax';
+  const currencySelector = '#currency';
+
+  const hq = {
+    addressLine: getVal(addressSelector),
+    city: getVal(citySelector),
+    stateRegion: getVal(stateSelector),
+    postalCode: getVal(postalSelector),
+    country: getVal(countrySelector),
+    phone: getVal(phoneSelector),
+    fax: getVal(faxSelector),
+    currency: getVal(currencySelector)
+  };
+
+  // ---- Alternate offices ----
+  const altOffices = [];
+  const blocks = document.querySelectorAll('.alt-office-block');
+
+  blocks.forEach((block, index) => {
+    const getInBlock = (selector) => {
+      const el = block.querySelector(selector);
+      if (!el) return '';
+      if (el.value !== undefined) return String(el.value).trim();
+      return (el.textContent || '').trim();
     };
 
-    try {
-        resultBox.textContent = "Calling backend...";
+    altOffices.push({
+      index,
+      label: block.querySelector('h3')?.textContent?.trim() || `Alternate Office ${index + 1}`,
+      country: getInBlock('.alt-office-country'),
+      phone: getInBlock('.alt-office-phone'),
+      fax: getInBlock('.alt-office-fax')
+    });
+  });
 
-        const res = await fetch("http://127.0.0.1:8000/enrich", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload)
-        });
-
-        if (!res.ok) {
-            const text = await res.text();
-            resultBox.textContent = `Error from backend (${res.status}): ${text}`;
-            return;
-        }
-
-        const data = await res.json();
-        resultBox.textContent = JSON.stringify(data, null, 2);
-
-    } catch (e) {
-        resultBox.textContent = "Error calling backend: " + e;
-    }
+  return { hq, altOffices };
 }
 
-
-
-// ---------------------------------------------------------
-// 2. SCRAPE FIELDS FROM CURRENT PAGE
-// ---------------------------------------------------------
-async function scrapeFromPage() {
-    const resultBox = document.getElementById("result");
-    resultBox.textContent = "Reading fields from current page...";
-
-    try {
-        // Get the active browser tab
-        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-        if (!tab || !tab.id) {
-            resultBox.textContent = "No active tab found.";
-            return;
-        }
-
-        // Ask the content script for data
-        const scraped = await chrome.tabs.sendMessage(tab.id, {
-            type: "SCRAPE_FORM"
-        });
-
-        if (!scraped) {
-            resultBox.textContent = "No data returned from page.";
-            return;
-        }
-
-        // Populate popup UI fields
-        document.getElementById("address_line").value = scraped.address_line || "";
-        document.getElementById("city").value = scraped.city || "";
-        document.getElementById("state").value = scraped.state || "";
-        document.getElementById("postal_code").value = scraped.postal_code || "";
-        document.getElementById("country").value = scraped.country || "";
-        document.getElementById("phone").value = scraped.phone || "";
-
-        resultBox.textContent = "Fields loaded from page. Now click 'Run Enrichment'.";
-
-    } catch (e) {
-        console.error(e);
-        resultBox.textContent = "Error reading from page: " + e;
+/**
+ * Runs inside the test form / CRM page.
+ *
+ * Applies enriched HQ data and enriched alternate office data
+ * back into the DOM.
+ *
+ * HQ:
+ *   formatted_phone -> #phone
+ *   formatted_fax   -> #fax
+ *   firm_currency   -> #currency
+ *   hq_country_iso  -> #hq_country_iso (if present; safe no-op otherwise)
+ *
+ * Alternate offices (per .alt-office-block index):
+ *   formatted_phone -> .alt-office-phone
+ *   formatted_fax   -> .alt-office-fax
+ */
+function applyAllEnrichedToPage(hqEnrichedArg, altEnrichedArg) {
+  const setVal = (element, value) => {
+    if (!element) return;
+    if ('value' in element) {
+      element.value = value ?? '';
+      element.dispatchEvent(new Event('input', { bubbles: true }));
+      element.dispatchEvent(new Event('change', { bubbles: true }));
+    } else {
+      element.textContent = value ?? '';
     }
+  };
+
+  // ---- Apply HQ ----
+  if (hqEnrichedArg) {
+    const phoneEl = document.querySelector('#phone');
+    const faxEl = document.querySelector('#fax');
+    const currencyEl = document.querySelector('#currency');
+    const isoEl = document.querySelector('#hq_country_iso'); // optional
+
+    if (hqEnrichedArg.formatted_phone) {
+      setVal(phoneEl, hqEnrichedArg.formatted_phone);
+    }
+    if (hqEnrichedArg.formatted_fax) {
+      setVal(faxEl, hqEnrichedArg.formatted_fax);
+    }
+    if (hqEnrichedArg.firm_currency) {
+      setVal(currencyEl, hqEnrichedArg.firm_currency);
+    }
+    if (hqEnrichedArg.hq_country_iso) {
+      setVal(isoEl, hqEnrichedArg.hq_country_iso);
+    }
+  }
+
+  // ---- Apply Alternate Offices ----
+  if (Array.isArray(altEnrichedArg)) {
+    const blocks = document.querySelectorAll('.alt-office-block');
+
+    altEnrichedArg.forEach((alt) => {
+      const block = blocks[alt.index];
+      if (!block || !alt.response) return;
+
+      const phoneEl = block.querySelector('.alt-office-phone');
+      const faxEl = block.querySelector('.alt-office-fax');
+
+      if (alt.response.formatted_phone) {
+        setVal(phoneEl, alt.response.formatted_phone);
+      }
+      if (alt.response.formatted_fax) {
+        setVal(faxEl, alt.response.formatted_fax);
+      }
+    });
+  }
 }
 
+// ============================================================
+// Button handlers (popup context)
+// ============================================================
 
+/**
+ * "Use fields from current page"
+ *
+ * Scrapes HQ + alternate office data using chrome.scripting.executeScript
+ * and stores them in popup state.
+ */
+function handleUseFieldsFromPage() {
+  logStatus('Reading HQ and alternate office fields from current page...', false);
 
-// ---------------------------------------------------------
-// 3. APPLY ENRICHED DATA BACK TO THE PAGE
-// ---------------------------------------------------------
-async function applyEnrichedDataToPage() {
-    const resultBox = document.getElementById("result");
+  getActiveTabId((tabId) => {
+    if (!tabId) return;
 
-    let enrichedData;
-    try {
-        enrichedData = JSON.parse(resultBox.textContent);
-    } catch {
-        resultBox.textContent = "No enriched data to apply. Run enrichment first.";
-        return;
-    }
-
-    if (!enrichedData || typeof enrichedData !== "object") {
-        resultBox.textContent = "Invalid enriched data.";
-        return;
-    }
-
-    try {
-        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-        if (!tab || !tab.id) {
-            resultBox.textContent = "No active tab.";
-            return;
+    chrome.scripting.executeScript(
+      {
+        target: { tabId },
+        func: scrapeAllFromPage
+      },
+      (results) => {
+        if (chrome.runtime.lastError) {
+          console.error('Error scraping page:', chrome.runtime.lastError);
+          logStatus('ERROR reading from page (scripting). See DevTools console.');
+          return;
         }
 
-        await chrome.tabs.sendMessage(tab.id, {
-            type: "APPLY_ENRICHMENT",
-            payload: enrichedData
-        });
+        const [res] = results || [];
+        if (!res || !res.result) {
+          logStatus('No data returned from page.');
+          return;
+        }
 
-        resultBox.textContent = "Enriched data applied to the page.";
+        hqSource = res.result.hq;
+        altSources = res.result.altOffices || [];
+        altEnriched = []; // reset previous enriched data
 
-    } catch (e) {
-        console.error(e);
-        resultBox.textContent = "Error applying data to page: " + e;
-    }
+        console.log('[Preqin Enricher] HQ source data:', hqSource);
+        console.log('[Preqin Enricher] Alternate office source data:', altSources);
+
+        logStatus(
+          'HQ fields read from page:\n' +
+          JSON.stringify(hqSource, null, 2) +
+          '\n\nAlternate offices:\n' +
+          JSON.stringify(altSources, null, 2)
+        );
+      }
+    );
+  });
 }
 
+/**
+ * "Run Enrichment"
+ *
+ *  - Enrich HQ once
+ *  - Enrich each alternate office with a separate call to /enrich
+ *
+ * For each call we reuse the same schema the backend expects:
+ *
+ *   { "hq": { "country": "...", "phone": "...", "fax": "..." } }
+ */
+async function handleRunEnrichment() {
+  if (!hqSource) {
+    alert('No HQ data loaded. Click "Use fields from current page" first.');
+    return;
+  }
 
+  logStatus('Running enrichment for HQ and alternate offices...', false);
 
-// ---------------------------------------------------------
-// 4. EVENT LISTENERS FOR THE THREE BUTTONS
-// ---------------------------------------------------------
-document.addEventListener("DOMContentLoaded", () => {
+  try {
+    // ---- Enrich HQ ----
+    const hqPayload = {
+      hq: {
+        country: hqSource.country,
+        phone: hqSource.phone,
+        fax: hqSource.fax
+      }
+    };
 
-    const scrapeBtn = document.getElementById("scrapeBtn");
-    if (scrapeBtn) {
-        scrapeBtn.addEventListener("click", scrapeFromPage);
+    console.log('[Preqin Enricher] Sending HQ payload to backend:', hqPayload);
+
+    const respHq = await fetch(BACKEND_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(hqPayload)
+    });
+
+    if (!respHq.ok) {
+      const text = await respHq.text();
+      console.error('Backend HQ error:', respHq.status, text);
+      logStatus(`Backend HQ error (${respHq.status}). Body:\n${text}`);
+      return;
     }
 
-    const enrichBtn = document.getElementById("enrichBtn");
-    if (enrichBtn) {
-        enrichBtn.addEventListener("click", runEnrichment);
+    hqEnriched = await respHq.json();
+    console.log('[Preqin Enricher] HQ enrichment response:', hqEnriched);
+
+    // ---- Enrich Alternate Offices ----
+    altEnriched = [];
+
+    for (const office of altSources) {
+      const altPayload = {
+        hq: {
+          country: office.country,
+          phone: office.phone,
+          fax: office.fax
+        }
+      };
+
+      console.log(
+        `[Preqin Enricher] Sending alt office payload (index ${office.index}) to backend:`,
+        altPayload
+      );
+
+      const respAlt = await fetch(BACKEND_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(altPayload)
+      });
+
+      if (!respAlt.ok) {
+        const textAlt = await respAlt.text();
+        console.error(
+          `Backend alt office error (index ${office.index}):`,
+          respAlt.status,
+          textAlt
+        );
+        altEnriched.push({
+          index: office.index,
+          label: office.label,
+          error: true,
+          errorStatus: respAlt.status,
+          errorBody: textAlt
+        });
+      } else {
+        const dataAlt = await respAlt.json();
+        altEnriched.push({
+          index: office.index,
+          label: office.label,
+          response: dataAlt
+        });
+      }
     }
 
-    const applyBtn = document.getElementById("applyBtn");
-    if (applyBtn) {
-        applyBtn.addEventListener("click", applyEnrichedDataToPage);
-    }
+    logStatus(
+      'Enrichment success.\n\nHQ:\n' +
+      JSON.stringify(hqEnriched, null, 2) +
+      '\n\nAlternate offices enriched:\n' +
+      JSON.stringify(altEnriched, null, 2)
+    );
+  } catch (err) {
+    console.error('Enrichment failed:', err);
+    logStatus('ERROR: Enrichment failed: ' + err.message);
+  }
+}
+
+/**
+ * "Apply enriched data to page"
+ *
+ * Writes enriched HQ + alternate office data back into the page
+ * using chrome.scripting.executeScript.
+ */
+function handleApplyToPage() {
+  if (!hqEnriched && !altEnriched.length) {
+    alert('No enriched data available. Run enrichment first.');
+    return;
+  }
+
+  logStatus('Applying enriched data back to page...', false);
+
+  getActiveTabId((tabId) => {
+    if (!tabId) return;
+
+    chrome.scripting.executeScript(
+      {
+        target: { tabId },
+        func: applyAllEnrichedToPage,
+        args: [hqEnriched, altEnriched]
+      },
+      () => {
+        if (chrome.runtime.lastError) {
+          console.error('Error applying enriched data to page:', chrome.runtime.lastError);
+          logStatus('ERROR applying enriched data. See DevTools console.');
+        } else {
+          console.log('[Preqin Enricher] Enriched HQ + alt office data applied to page.');
+          logStatus('Enriched HQ + alternate office data applied to page.');
+        }
+      }
+    );
+  });
+}
+
+// ============================================================
+// Initialization
+// ============================================================
+
+document.addEventListener('DOMContentLoaded', () => {
+  const btnUse = document.getElementById('btn-use-fields-from-page');
+  const btnEnrich = document.getElementById('btn-run-enrichment');
+  const btnApply = document.getElementById('btn-apply-to-page');
+
+  if (btnUse) btnUse.addEventListener('click', handleUseFieldsFromPage);
+  if (btnEnrich) btnEnrich.addEventListener('click', handleRunEnrichment);
+  if (btnApply) btnApply.addEventListener('click', handleApplyToPage);
+
+  logStatus('Popup loaded. Ready.', false);
 });

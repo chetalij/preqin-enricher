@@ -1,34 +1,17 @@
 {
   "manifest_version": 3,
   "name": "Preqin Enricher",
-  "version": "1.0",
-  "description": "Enrich CRM data using a local FastAPI backend.",
-
+  "version": "1.0.0",
+  "description": "Enriches HQ details in Preqin CRM using a local FastAPI backend.",
   "permissions": [
-    "activeTab",
-    "scripting"
+    "scripting",
+    "activeTab"
   ],
-
   "host_permissions": [
     "http://127.0.0.1:8000/*"
   ],
-
   "action": {
     "default_popup": "popup.html",
     "default_title": "Preqin Enricher"
-  },
-
-  "content_scripts": [
-    {
-      "matches": ["<all_urls>"],
-      "js": ["content.js"]
-    }
-  ],
-
-  "web_accessible_resources": [
-    {
-      "resources": ["popup.js"],
-      "matches": ["<all_urls>"]
-    }
-  ]
+  }
 }
