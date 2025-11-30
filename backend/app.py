@@ -13,7 +13,7 @@ from bs4 import BeautifulSoup
 
 from phone_templates import PHONE_TEMPLATES
 
-# site-specific scrapers registry (expects backend/scrapers/__init__.py exporting SITE_SCRAPERS)
+# Try importing site-specific scrapers registry if present
 try:
     from scrapers import SITE_SCRAPERS
 except Exception:
@@ -121,7 +121,6 @@ def parse_address_improved(raw: Optional[str]) -> Dict[str, Optional[str]]:
             if tokens and tokens[-1].lower() == country_token.lower():
                 tokens = tokens[:-1]
         except Exception:
-            # leave country as raw token (but don't remove token)
             country = country_token
 
     # Heuristics for street/city/state
@@ -275,7 +274,7 @@ def generate_about(firm_name: Optional[str], firm_type: Optional[str], parsed_hq
     return about
 
 # ----------------------------
-# Generic website scraper (heuristic)
+# Generic website scraper (improved)
 # ----------------------------
 
 _PHONE_RE = re.compile(r"(?:\+?\d{1,3}[\s\-\(]?)?(?:\(?\d{2,4}\)?[\s\-\)]?){1,4}\d{3,4}", re.IGNORECASE)
@@ -298,38 +297,84 @@ def _extract_tel_hrefs(soup: BeautifulSoup) -> List[Dict[str, str]]:
 def _extract_text_phones(s: str) -> List[str]:
     return list({m.group(0).strip() for m in _PHONE_RE.finditer(s)})
 
-def _extract_address_candidates(soup: BeautifulSoup) -> List[str]:
+def _extract_address_candidates(soup: BeautifulSoup) -> List[Dict[str, Optional[str]]]:
+    """
+    Improved heuristic extraction of addresses:
+      - returns a list of dicts { 'addr_text', 'phone', 'fax', 'email' }
+      - prefers <address> tags, then elements with address-like class/id
+      - when an 'office' block is found, extract inner .addr/.address for address,
+        and inner .phone/.fax/a[href^="mailto:"] for contacts.
+    """
     candidates = []
+
+    # 1) <address> tags
     for tag in soup.find_all('address'):
         text = tag.get_text(separator=', ').strip()
+        phone_el = tag.select_one('.phone, .tel')
+        fax_el = tag.select_one('.fax')
+        email_el = tag.select_one('a[href^="mailto:"]')
+        phone = phone_el.get_text().strip() if phone_el else None
+        fax = fax_el.get_text().strip() if fax_el else None
+        email = email_el['href'].split(':',1)[1].split('?')[0].strip() if email_el else None
         if text:
-            candidates.append(text)
+            candidates.append({'addr_text': text, 'phone': phone, 'fax': fax, 'email': email})
+
+    # 2) any element with office/address-like class
     for tag in soup.find_all(True, {'class': True}):
-        clss = " ".join(tag.get('class') or [])
-        if any(k in clss.lower() for k in ('address', 'office', 'location', 'branch')):
-            text = tag.get_text(separator=', ').strip()
+        class_text = " ".join(tag.get('class') or []).lower()
+        if any(key in class_text for key in ('office', 'address', 'location', 'branch')):
+            addr_el = tag.select_one('.addr, .address')
+            if addr_el:
+                text = addr_el.get_text(separator=', ').strip()
+            else:
+                text = tag.get_text(separator=', ').strip()
+
+            phone_el = tag.select_one('.phone, .tel')
+            fax_el = tag.select_one('.fax')
+            email_el = tag.select_one('a[href^="mailto:"]')
+            phone = phone_el.get_text().strip() if phone_el else None
+            fax = fax_el.get_text().strip() if fax_el else None
+            email = email_el['href'].split(':',1)[1].split('?')[0].strip() if email_el else None
+
             if text:
-                candidates.append(text)
+                candidates.append({'addr_text': text, 'phone': phone, 'fax': fax, 'email': email})
+
+    # 3) same based on id
     for tag in soup.find_all(True, id=True):
-        idv = tag.get('id') or ''
-        if any(k in idv.lower() for k in ('address', 'office', 'location', 'branch')):
-            text = tag.get_text(separator=', ').strip()
+        id_text = (tag.get('id') or '').lower()
+        if any(key in id_text for key in ('office', 'address', 'location', 'branch')):
+            addr_el = tag.select_one('.addr, .address')
+            if addr_el:
+                text = addr_el.get_text(separator=', ').strip()
+            else:
+                text = tag.get_text(separator=', ').strip()
+            phone_el = tag.select_one('.phone, .tel')
+            fax_el = tag.select_one('.fax')
+            email_el = tag.select_one('a[href^="mailto:"]')
+            phone = phone_el.get_text().strip() if phone_el else None
+            fax = fax_el.get_text().strip() if fax_el else None
+            email = email_el['href'].split(':',1)[1].split('?')[0].strip() if email_el else None
             if text:
-                candidates.append(text)
-    body_text = soup.get_text(separator='\n')
-    for line in body_text.splitlines():
+                candidates.append({'addr_text': text, 'phone': phone, 'fax': fax, 'email': email})
+
+    # 4) fallback: body text scanning for lines containing countries
+    body = soup.get_text(separator='\n')
+    for line in body.splitlines():
         line = line.strip()
-        if not line or len(line) < 10:
+        if len(line) < 10:
             continue
-        if any(country.lower() in line.lower() for country in _COUNTRY_NAMES) and ',' in line:
-            candidates.append(line)
+        if ',' in line and any(country.lower() in line.lower() for country in _COUNTRY_NAMES):
+            candidates.append({'addr_text': line, 'phone': None, 'fax': None, 'email': None})
+
+    # Deduplicate
     seen = set()
     out = []
     for c in candidates:
-        norm = " ".join(c.split())
-        if norm not in seen:
-            seen.add(norm)
-            out.append(norm)
+        key = (c.get('addr_text') or '').strip()
+        if key and key not in seen:
+            seen.add(key)
+            out.append(c)
+
     return out
 
 def scrape_website_for_offices(url: str, max_offices: int = 10) -> List[Dict[str, Optional[str]]]:
@@ -340,33 +385,43 @@ def scrape_website_for_offices(url: str, max_offices: int = 10) -> List[Dict[str
         return []
 
     soup = BeautifulSoup(resp.text, "html.parser")
+
     tel_links = _extract_tel_hrefs(soup)
-    text_phones = _extract_text_phones(soup.get_text(separator="\n"))
-    emails = set()
-    for a in soup.find_all('a', href=True):
-        if a['href'].lower().startswith('mailto:'):
-            emails.add(a['href'].split(':', 1)[1].split('?')[0].strip())
     addr_candidates = _extract_address_candidates(soup)
 
     offices: List[Dict[str, Optional[str]]] = []
-    for addr in addr_candidates[:max_offices]:
-        office = {'address': addr, 'phone': None, 'fax': None, 'email': None, 'website': url}
-        phones_in_addr = _extract_text_phones(addr)
-        if phones_in_addr:
-            office['phone'] = phones_in_addr[0]
-            if len(phones_in_addr) > 1:
-                office['fax'] = phones_in_addr[1]
-        offices.append(office)
+    for c in addr_candidates[:max_offices]:
+        addr = c.get("addr_text")
+        phone = c.get("phone")
+        fax = c.get("fax")
+        email = c.get("email")
 
+        # fallback: extract tel-like patterns if phone missing
+        if not phone:
+            extracted = _extract_text_phones(addr or "")
+            if extracted:
+                phone = extracted[0]
+                if len(extracted) > 1 and not fax:
+                    fax = extracted[1]
+
+        offices.append({
+            "address": addr,
+            "phone": phone,
+            "fax": fax,
+            "email": email,
+            "website": url
+        })
+
+    # Use tel: links to fill blanks by index if needed
     phone_only = [t['value'] for t in tel_links if t['type'] == 'phone']
     fax_only = [t['value'] for t in tel_links if t['type'] == 'fax']
-
     for i, office in enumerate(offices):
         if not office.get('phone') and i < len(phone_only):
             office['phone'] = phone_only[i]
         if not office.get('fax') and i < len(fax_only):
             office['fax'] = fax_only[i]
 
+    # If no structured offices found, try to build minimal entries from tel links near elements
     if not offices:
         for a in soup.find_all('a', href=True):
             if a['href'].lower().startswith('tel:'):
@@ -376,11 +431,14 @@ def scrape_website_for_offices(url: str, max_offices: int = 10) -> List[Dict[str
                 if len(offices) >= max_offices:
                     break
 
+    # Attach primary email if present
+    emails = {a['href'].split(':',1)[1].split('?')[0].strip() for a in soup.find_all('a', href=True) if a['href'].lower().startswith('mailto:')}
     primary_email = next(iter(emails), None)
     for office in offices:
         if not office.get('email'):
             office['email'] = primary_email
 
+    # Normalize offices using existing helpers
     normalized_offices = []
     for off in offices:
         parsed = parse_address_improved(off.get('address'))
@@ -403,7 +461,7 @@ def scrape_website_for_offices(url: str, max_offices: int = 10) -> List[Dict[str
     return normalized_offices
 
 # ----------------------------
-# Scrape endpoint with site-specific routing
+# Scrape endpoint (site-specific routing)
 # ----------------------------
 
 @app.post("/scrape")
