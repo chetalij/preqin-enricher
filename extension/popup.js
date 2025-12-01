@@ -1,5 +1,4 @@
-// popup.js — popup-only, enrich + auto About-generator (follows user's strict template & rules)
-
+// popup.js — full updated version (services list: comma-separated only, then ", and more.")
 const statusEl = document.getElementById("status");
 function setStatus(msg) {
   const t = `${new Date().toLocaleTimeString()} — ${msg}`;
@@ -9,21 +8,11 @@ function setStatus(msg) {
 
 document.getElementById("run").addEventListener("click", runEnrich);
 
-function sentenceCase(s) {
-  if (!s || typeof s !== "string") return "";
-  s = s.trim();
-  if (!s) return "";
-  return s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
-}
-
-// Choose up to n items, return array (preserving input order)
+// helper: pick up to n items preserving order
 function pickItems(arr, n) {
   if (!Array.isArray(arr)) return [];
-  const clean = arr.map(a => (a || "").toString().trim()).filter(Boolean);
-  return clean.slice(0, n);
+  return arr.map(a => (a || "").toString().trim()).filter(Boolean).slice(0, n);
 }
-
-// Join list with commas and an "and" before last item. Items are already in sentence-case.
 function joinWithOxford(list) {
   if (!list || list.length === 0) return "";
   if (list.length === 1) return list[0];
@@ -31,147 +20,126 @@ function joinWithOxford(list) {
   return `${list.slice(0, -1).join(", ")}, and ${list[list.length - 1]}`;
 }
 
-// heuristics for choosing "a" vs "an" based on initial SOUND (best-effort)
-function chooseArticle(phrase) {
-  if (!phrase) return "a";
-  const word = phrase.trim().split(/\s+/)[0].toLowerCase();
-  // common vowel-starting words -> use "an"
-  const vowels = ["a", "e", "i", "o", "u"];
-  // handle some special cases where first letter vowel but pronounced consonant: (rare)
-  const consonantSoundExceptions = ["university", "unicorn", "use", "user", "european"]; // pronounced 'yoo' -> 'a'
-  const vowelSoundExceptions = ["hour", "honest", "honour"]; // silent h -> 'an'
-  if (consonantSoundExceptions.includes(word)) return "a";
-  if (vowelSoundExceptions.includes(word)) return "an";
-  const first = word.charAt(0);
-  if (vowels.includes(first)) return "an";
+// article choice (best-effort on sound)
+function chooseArticle(word) {
+  if (!word) return "a";
+  const w = word.trim().toLowerCase();
+  // special pronunciations
+  const consonantSoundExceptions = ["university", "unicorn", "use", "user", "european"];
+  const vowelSoundExceptions = ["hour", "honest", "honour"];
+  if (consonantSoundExceptions.includes(w)) return "a";
+  if (vowelSoundExceptions.includes(w)) return "an";
+  const first = w[0];
+  if ("aeiou".includes(first)) return "an";
   return "a";
 }
 
-// Ensure firm type formatting: if not exactly "law firm" (case-insensitive), append "Firm" if not present
-function normalizeFirmType(raw) {
-  if (!raw) return "Firm";
-  let s = raw.trim();
-  // normalize casing to Title Case for readability
-  s = s.split(/\s+/).map(t => t.charAt(0).toUpperCase() + t.slice(1).toLowerCase()).join(" ");
-  if (s.toLowerCase() === "law firm") return "Law Firm";
-  // if 'firm' not present at end, append 'Firm'
-  if (!/firm$/i.test(s)) {
-    s = `${s} Firm`;
-  }
+// normalize firm type to lowercased phrase; ensure "firm" present (except exact "law firm")
+function normalizeFirmTypeLower(raw) {
+  if (!raw) return "firm";
+  let s = raw.trim().toLowerCase();
+  if (s === "law firm") return "law firm";
+  if (!s.endsWith("firm")) s = `${s} firm`;
   return s;
 }
 
-// Extract services (array of strings) from page DOM
-function readServicesFromPage() {
-  try {
-    const container = document.querySelector("#services_offered");
-    if (!container) return [];
-    return Array.from(container.querySelectorAll("input[type=checkbox]"))
-      .filter(i => i.checked)
-      .map(i => i.value)
-      .filter(Boolean);
-  } catch (e) {
-    console.warn("readServicesFromPage error", e);
-    return [];
+// Extract city/state from parsed hq or best-effort from raw address
+function chooseLocation(parsed, raw) {
+  if (parsed) {
+    const state = parsed.state && parsed.state.trim();
+    const city = parsed.city && parsed.city.trim();
+    const country = parsed.country && parsed.country.trim();
+    if (state) return { primary: state, country: country || "" };
+    if (city) return { primary: city, country: country || "" };
   }
+  // best-effort parse from raw: split by commas, remove postcode-like tokens and country, return last remaining token
+  if (raw && raw.trim()) {
+    const parts = raw.split(",").map(p => p.trim()).filter(Boolean);
+    if (parts.length === 0) return { primary: null, country: null };
+    // last token is likely country
+    const country = parts[parts.length - 1];
+    // build candidate tokens excluding obvious postcode tokens (tokens that contain digits)
+    const candidates = parts.slice(0, -1).filter(tok => {
+      if (/\d/.test(tok)) return false;
+      return true;
+    });
+    if (candidates.length > 0) {
+      const primary = candidates[candidates.length - 1];
+      return { primary: primary, country: country || "" };
+    } else {
+      if (parts.length >= 2) {
+        const candidate = parts[parts.length - 2];
+        const subparts = candidate.split(" ").map(s => s.trim()).filter(Boolean).filter(sp => !/\d/.test(sp));
+        const primary = subparts.length ? subparts.join(" ") : candidate;
+        return { primary: primary, country: country || "" };
+      } else {
+        return { primary: null, country: country || "" };
+      }
+    }
+  }
+  return { primary: null, country: null };
 }
 
-// Extract fund types from page DOM
-function readFundsFromPage() {
-  try {
-    const container = document.querySelector("#funds_serviced");
-    if (!container) return [];
-    return Array.from(container.querySelectorAll("input[type=checkbox]"))
-      .filter(i => i.checked)
-      .map(i => i.value)
-      .filter(Boolean);
-  } catch (e) {
-    console.warn("readFundsFromPage error", e);
-    return [];
-  }
+// services -> lowercase formatting
+function formatService(s) {
+  if (!s) return "";
+  return s.trim().toLowerCase();
 }
 
-// Build the about string according to user's strict template and rules
-function buildAboutSentence(opts) {
+// funds -> preserve uppercase acronyms (CLO etc.), otherwise lowercase
+function formatFund(f) {
+  if (!f) return "";
+  const t = f.trim();
+  if (/^[A-Z]{2,4}$/.test(t)) return t;
+  return t.toLowerCase();
+}
+
+// Build about text following exact template and rules
+function buildAbout(opts) {
   // opts: { firmName, firmTypeRaw, hq_parsed, hq_raw, servicesArr, fundsArr }
   const firmName = (opts.firmName || "").trim() || "The firm";
   const firmTypeRaw = (opts.firmTypeRaw || "").trim();
-  const firmTypeNormalized = normalizeFirmType(firmTypeRaw);
-  const article = chooseArticle(firmTypeNormalized);
+  const firmType = normalizeFirmTypeLower(firmTypeRaw); // lowercased
+  const article = chooseArticle(firmTypeRaw || firmType);
 
-  // Location: prioritize state, else city
-  let state = null;
-  let city = null;
-  let country = null;
-  if (opts.hq_parsed && typeof opts.hq_parsed === "object") {
-    state = opts.hq_parsed.state || null;
-    city = opts.hq_parsed.city || null;
-    country = opts.hq_parsed.country || null;
-  }
-  // best-effort parse from raw address if parsed is missing values
-  if (!country && opts.hq_raw) {
-    const parts = opts.hq_raw.split(",").map(p => p.trim()).filter(Boolean);
-    if (parts.length >= 1) country = parts[parts.length - 1];
-    if (!state && parts.length >= 3) {
-      // assume pattern: street, city, state/postcode, country — try parts[parts.length-2]
-      state = parts[parts.length - 2];
-    } else if (!city && parts.length >= 2) {
-      city = parts[parts.length - 2];
-    }
-  }
-  // prefer state if present, else city. If both absent, use 'an unknown location' (but template expects State, Country)
-  const locPrimary = state || city || null;
-  const locCountry = country || "";
+  const loc = chooseLocation(opts.hq_parsed || {}, opts.hq_raw || "");
+  const primary = loc.primary;
+  const country = loc.country || "";
 
-  // Services handling
-  let services = Array.isArray(opts.servicesArr) ? opts.servicesArr.slice() : [];
-  // map to sentence case
-  services = services.map(s => sentenceCase(s));
+  const servicesIn = Array.isArray(opts.servicesArr) ? opts.servicesArr : [];
+  const fundsIn = Array.isArray(opts.fundsArr) ? opts.fundsArr : [];
+
+  // Services selection & formatting (comma-separated, NO 'and' before last item, then append ", and more.")
   let servicesClause = "";
-  if (!services || services.length === 0) {
+  if (!servicesIn || servicesIn.length === 0) {
     servicesClause = "It provides a wide range of financial services,";
   } else {
-    // choose up to 5
-    const chosen = pickItems(services, 5);
-    const joined = joinWithOxford(chosen);
+    const chosen = pickItems(servicesIn, 5).map(formatService);
+    const joined = chosen.join(", "); // NO 'and'
     servicesClause = `It provides services including ${joined}, and more.`;
   }
 
-  // Fund types handling
-  let funds = Array.isArray(opts.fundsArr) ? opts.fundsArr.slice() : [];
-  funds = funds.map(f => sentenceCase(f));
+  // Funds selection & formatting (Oxford rule applies here)
   let fundClause = "";
-  if (!funds || funds.length === 0) {
-    // Replace entire fund type clause with placeholder per instructions.
+  if (!fundsIn || fundsIn.length === 0) {
     fundClause = "The firm advises various types of funds.";
   } else {
-    const chosenFunds = pickItems(funds, 4);
+    const chosenFunds = pickItems(fundsIn, 4).map(formatFund);
     const joinedFunds = joinWithOxford(chosenFunds);
     const verb = (chosenFunds.length === 1) ? "is" : "are";
-    // decide singular/plural phrasing as requested
     fundClause = `The fund ${chosenFunds.length === 1 ? "type" : "types"} advised by the firm ${verb} ${joinedFunds}, among others.`;
   }
 
-  // Assemble final sentence EXACTLY in template order:
-  // "[Firm Name] is [a/an] [Firm Type] headquartered in [State], [Country]. It provides services including [...], and more. The fund type(s) advised by the firm [is/are] [...], among others."
-  const locationPart = locPrimary ? `${locPrimary}, ${locCountry}` : (locCountry ? `${locCountry}` : "an unknown location");
-  // Capitalize firmTypeNormalized appropriately (already Title Case)
-  const firstSentence = `${firmName} is ${article} ${firmTypeNormalized} headquartered in ${locationPart}.`;
+  const locationPart = primary ? `${primary}, ${country}`.trim() : (country ? `${country}` : "an unknown location");
 
-  // If we used placeholder for servicesClause, ensure it ends with a space/separator consistent with template.
-  // The template expects the services sentence to be present before the fund clause.
-  // We built servicesClause earlier to either be placeholder or the normal 'It provides services including ...'
-  // Ensure punctuation: if servicesClause already ends with '.', keep it; otherwise add a period.
+  const firstSentence = `${firmName} is ${article} ${firmType} headquartered in ${locationPart}.`;
   let servicesSentence = servicesClause;
   if (!servicesSentence.endsWith(".")) servicesSentence = servicesSentence.endsWith(",") ? servicesSentence + " and more." : servicesSentence + ".";
-  // If servicesClause already had 'and more.' we don't alter it.
-
-  // If fundClause is the placeholder "The firm advises various types of funds.", it fits the template replacement.
   const about = `${firstSentence} ${servicesSentence} ${fundClause}`;
   return about;
 }
 
-// Main run: scrape page, call backend, write back results + build about
+// Main flow (scrape, post to backend, apply formatting, build About)
 async function runEnrich() {
   setStatus("Starting scrape...");
   try {
@@ -200,7 +168,6 @@ async function runEnrich() {
         const hq_email = get("#hq_email");
 
         const firmName = get("#firm_name") || get("#firm_name_display") || get(".firm-name");
-
         const firmType = get("#firm_type") || get(".firm-type") || null;
 
         const services = Array.from(document.querySelectorAll("#services_offered input[type=checkbox]"))
@@ -333,7 +300,7 @@ async function runEnrich() {
       servicesArr: payload.services || [],
       fundsArr: payload.funds || []
     };
-    const aboutText = buildAboutSentence(aboutOpts);
+    const aboutText = buildAbout(aboutOpts);
     console.log("Generated About:", aboutText);
 
     // Inject About into page
