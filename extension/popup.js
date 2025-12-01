@@ -1,411 +1,360 @@
-// popup.js
-'use strict';
+// popup.js — popup-only, enrich + auto About-generator (follows user's strict template & rules)
 
-// ============================================================
-// Configuration
-// ============================================================
+const statusEl = document.getElementById("status");
+function setStatus(msg) {
+  const t = `${new Date().toLocaleTimeString()} — ${msg}`;
+  if (statusEl) statusEl.innerText = t;
+  console.log("[popup] " + msg);
+}
 
-// FastAPI backend endpoint
-const BACKEND_URL = 'http://127.0.0.1:8000/enrich';
+document.getElementById("run").addEventListener("click", runEnrich);
 
-// In-memory state in the popup
-let hqSource = null;          // HQ data scraped from the page
-let hqEnriched = null;        // HQ data returned from the backend
-let altSources = [];          // Alternate office data scraped from the page
-let altEnriched = [];         // Alternate office enriched responses
+function sentenceCase(s) {
+  if (!s || typeof s !== "string") return "";
+  s = s.trim();
+  if (!s) return "";
+  return s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
+}
 
-// ============================================================
-// Utility helpers (popup context)
-// ============================================================
+// Choose up to n items, return array (preserving input order)
+function pickItems(arr, n) {
+  if (!Array.isArray(arr)) return [];
+  const clean = arr.map(a => (a || "").toString().trim()).filter(Boolean);
+  return clean.slice(0, n);
+}
 
-/**
- * Append or replace status text in the popup "Status / Debug" box.
- */
-function logStatus(message, append = true) {
-  const statusEl = document.getElementById('status');
-  if (!statusEl) return;
+// Join list with commas and an "and" before last item. Items are already in sentence-case.
+function joinWithOxford(list) {
+  if (!list || list.length === 0) return "";
+  if (list.length === 1) return list[0];
+  if (list.length === 2) return `${list[0]} and ${list[1]}`;
+  return `${list.slice(0, -1).join(", ")}, and ${list[list.length - 1]}`;
+}
 
-  const time = new Date().toLocaleTimeString();
-  const line = `[${time}] ${message}`;
+// heuristics for choosing "a" vs "an" based on initial SOUND (best-effort)
+function chooseArticle(phrase) {
+  if (!phrase) return "a";
+  const word = phrase.trim().split(/\s+/)[0].toLowerCase();
+  // common vowel-starting words -> use "an"
+  const vowels = ["a", "e", "i", "o", "u"];
+  // handle some special cases where first letter vowel but pronounced consonant: (rare)
+  const consonantSoundExceptions = ["university", "unicorn", "use", "user", "european"]; // pronounced 'yoo' -> 'a'
+  const vowelSoundExceptions = ["hour", "honest", "honour"]; // silent h -> 'an'
+  if (consonantSoundExceptions.includes(word)) return "a";
+  if (vowelSoundExceptions.includes(word)) return "an";
+  const first = word.charAt(0);
+  if (vowels.includes(first)) return "an";
+  return "a";
+}
 
-  if (append) {
-    statusEl.textContent = statusEl.textContent
-      ? statusEl.textContent + '\n' + line
-      : line;
-  } else {
-    statusEl.textContent = line;
+// Ensure firm type formatting: if not exactly "law firm" (case-insensitive), append "Firm" if not present
+function normalizeFirmType(raw) {
+  if (!raw) return "Firm";
+  let s = raw.trim();
+  // normalize casing to Title Case for readability
+  s = s.split(/\s+/).map(t => t.charAt(0).toUpperCase() + t.slice(1).toLowerCase()).join(" ");
+  if (s.toLowerCase() === "law firm") return "Law Firm";
+  // if 'firm' not present at end, append 'Firm'
+  if (!/firm$/i.test(s)) {
+    s = `${s} Firm`;
   }
+  return s;
 }
 
-/**
- * Get the currently active tab ID.
- */
-function getActiveTabId(callback) {
-  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-    if (!tabs || !tabs.length) {
-      console.error('No active tab found.');
-      logStatus('ERROR: No active tab found.');
-      callback(null);
-      return;
-    }
-    callback(tabs[0].id);
-  });
-}
-
-// ============================================================
-// Page-context functions (run inside test-form / CRM page)
-// ============================================================
-
-/**
- * Runs inside the test form / CRM page.
- *
- * Reads:
- *   HQ:
- *     #hq_address
- *     #hq_city
- *     #hq_state
- *     #hq_postal
- *     #hq_country
- *     #phone
- *     #fax
- *     #currency
- *
- *   Alternate offices:
- *     .alt-office-block
- *       .alt-office-country
- *       .alt-office-phone
- *       .alt-office-fax
- *
- * Returns: { hq, altOffices }
- */
-function scrapeAllFromPage() {
-  const getVal = (selector) => {
-    const el = document.querySelector(selector);
-    if (!el) return '';
-    if (el.value !== undefined) return String(el.value).trim();
-    return (el.textContent || '').trim();
-  };
-
-  // ---- HQ ----
-  const addressSelector = '#hq_address';
-  const citySelector = '#hq_city';
-  const stateSelector = '#hq_state';
-  const postalSelector = '#hq_postal';
-  const countrySelector = '#hq_country';
-  const phoneSelector = '#phone';
-  const faxSelector = '#fax';
-  const currencySelector = '#currency';
-
-  const hq = {
-    addressLine: getVal(addressSelector),
-    city: getVal(citySelector),
-    stateRegion: getVal(stateSelector),
-    postalCode: getVal(postalSelector),
-    country: getVal(countrySelector),
-    phone: getVal(phoneSelector),
-    fax: getVal(faxSelector),
-    currency: getVal(currencySelector)
-  };
-
-  // ---- Alternate offices ----
-  const altOffices = [];
-  const blocks = document.querySelectorAll('.alt-office-block');
-
-  blocks.forEach((block, index) => {
-    const getInBlock = (selector) => {
-      const el = block.querySelector(selector);
-      if (!el) return '';
-      if (el.value !== undefined) return String(el.value).trim();
-      return (el.textContent || '').trim();
-    };
-
-    altOffices.push({
-      index,
-      label: block.querySelector('h3')?.textContent?.trim() || `Alternate Office ${index + 1}`,
-      country: getInBlock('.alt-office-country'),
-      phone: getInBlock('.alt-office-phone'),
-      fax: getInBlock('.alt-office-fax')
-    });
-  });
-
-  return { hq, altOffices };
-}
-
-/**
- * Runs inside the test form / CRM page.
- *
- * Applies enriched HQ data and enriched alternate office data
- * back into the DOM.
- *
- * HQ:
- *   formatted_phone -> #phone
- *   formatted_fax   -> #fax
- *   firm_currency   -> #currency
- *   hq_country_iso  -> #hq_country_iso (if present; safe no-op otherwise)
- *
- * Alternate offices (per .alt-office-block index):
- *   formatted_phone -> .alt-office-phone
- *   formatted_fax   -> .alt-office-fax
- */
-function applyAllEnrichedToPage(hqEnrichedArg, altEnrichedArg) {
-  const setVal = (element, value) => {
-    if (!element) return;
-    if ('value' in element) {
-      element.value = value ?? '';
-      element.dispatchEvent(new Event('input', { bubbles: true }));
-      element.dispatchEvent(new Event('change', { bubbles: true }));
-    } else {
-      element.textContent = value ?? '';
-    }
-  };
-
-  // ---- Apply HQ ----
-  if (hqEnrichedArg) {
-    const phoneEl = document.querySelector('#phone');
-    const faxEl = document.querySelector('#fax');
-    const currencyEl = document.querySelector('#currency');
-    const isoEl = document.querySelector('#hq_country_iso'); // optional
-
-    if (hqEnrichedArg.formatted_phone) {
-      setVal(phoneEl, hqEnrichedArg.formatted_phone);
-    }
-    if (hqEnrichedArg.formatted_fax) {
-      setVal(faxEl, hqEnrichedArg.formatted_fax);
-    }
-    if (hqEnrichedArg.firm_currency) {
-      setVal(currencyEl, hqEnrichedArg.firm_currency);
-    }
-    if (hqEnrichedArg.hq_country_iso) {
-      setVal(isoEl, hqEnrichedArg.hq_country_iso);
-    }
-  }
-
-  // ---- Apply Alternate Offices ----
-  if (Array.isArray(altEnrichedArg)) {
-    const blocks = document.querySelectorAll('.alt-office-block');
-
-    altEnrichedArg.forEach((alt) => {
-      const block = blocks[alt.index];
-      if (!block || !alt.response) return;
-
-      const phoneEl = block.querySelector('.alt-office-phone');
-      const faxEl = block.querySelector('.alt-office-fax');
-
-      if (alt.response.formatted_phone) {
-        setVal(phoneEl, alt.response.formatted_phone);
-      }
-      if (alt.response.formatted_fax) {
-        setVal(faxEl, alt.response.formatted_fax);
-      }
-    });
-  }
-}
-
-// ============================================================
-// Button handlers (popup context)
-// ============================================================
-
-/**
- * "Use fields from current page"
- *
- * Scrapes HQ + alternate office data using chrome.scripting.executeScript
- * and stores them in popup state.
- */
-function handleUseFieldsFromPage() {
-  logStatus('Reading HQ and alternate office fields from current page...', false);
-
-  getActiveTabId((tabId) => {
-    if (!tabId) return;
-
-    chrome.scripting.executeScript(
-      {
-        target: { tabId },
-        func: scrapeAllFromPage
-      },
-      (results) => {
-        if (chrome.runtime.lastError) {
-          console.error('Error scraping page:', chrome.runtime.lastError);
-          logStatus('ERROR reading from page (scripting). See DevTools console.');
-          return;
-        }
-
-        const [res] = results || [];
-        if (!res || !res.result) {
-          logStatus('No data returned from page.');
-          return;
-        }
-
-        hqSource = res.result.hq;
-        altSources = res.result.altOffices || [];
-        altEnriched = []; // reset previous enriched data
-
-        console.log('[Preqin Enricher] HQ source data:', hqSource);
-        console.log('[Preqin Enricher] Alternate office source data:', altSources);
-
-        logStatus(
-          'HQ fields read from page:\n' +
-          JSON.stringify(hqSource, null, 2) +
-          '\n\nAlternate offices:\n' +
-          JSON.stringify(altSources, null, 2)
-        );
-      }
-    );
-  });
-}
-
-/**
- * "Run Enrichment"
- *
- *  - Enrich HQ once
- *  - Enrich each alternate office with a separate call to /enrich
- *
- * For each call we reuse the same schema the backend expects:
- *
- *   { "hq": { "country": "...", "phone": "...", "fax": "..." } }
- */
-async function handleRunEnrichment() {
-  if (!hqSource) {
-    alert('No HQ data loaded. Click "Use fields from current page" first.');
-    return;
-  }
-
-  logStatus('Running enrichment for HQ and alternate offices...', false);
-
+// Extract services (array of strings) from page DOM
+function readServicesFromPage() {
   try {
-    // ---- Enrich HQ ----
-    const hqPayload = {
-      hq: {
-        country: hqSource.country,
-        phone: hqSource.phone,
-        fax: hqSource.fax
+    const container = document.querySelector("#services_offered");
+    if (!container) return [];
+    return Array.from(container.querySelectorAll("input[type=checkbox]"))
+      .filter(i => i.checked)
+      .map(i => i.value)
+      .filter(Boolean);
+  } catch (e) {
+    console.warn("readServicesFromPage error", e);
+    return [];
+  }
+}
+
+// Extract fund types from page DOM
+function readFundsFromPage() {
+  try {
+    const container = document.querySelector("#funds_serviced");
+    if (!container) return [];
+    return Array.from(container.querySelectorAll("input[type=checkbox]"))
+      .filter(i => i.checked)
+      .map(i => i.value)
+      .filter(Boolean);
+  } catch (e) {
+    console.warn("readFundsFromPage error", e);
+    return [];
+  }
+}
+
+// Build the about string according to user's strict template and rules
+function buildAboutSentence(opts) {
+  // opts: { firmName, firmTypeRaw, hq_parsed, hq_raw, servicesArr, fundsArr }
+  const firmName = (opts.firmName || "").trim() || "The firm";
+  const firmTypeRaw = (opts.firmTypeRaw || "").trim();
+  const firmTypeNormalized = normalizeFirmType(firmTypeRaw);
+  const article = chooseArticle(firmTypeNormalized);
+
+  // Location: prioritize state, else city
+  let state = null;
+  let city = null;
+  let country = null;
+  if (opts.hq_parsed && typeof opts.hq_parsed === "object") {
+    state = opts.hq_parsed.state || null;
+    city = opts.hq_parsed.city || null;
+    country = opts.hq_parsed.country || null;
+  }
+  // best-effort parse from raw address if parsed is missing values
+  if (!country && opts.hq_raw) {
+    const parts = opts.hq_raw.split(",").map(p => p.trim()).filter(Boolean);
+    if (parts.length >= 1) country = parts[parts.length - 1];
+    if (!state && parts.length >= 3) {
+      // assume pattern: street, city, state/postcode, country — try parts[parts.length-2]
+      state = parts[parts.length - 2];
+    } else if (!city && parts.length >= 2) {
+      city = parts[parts.length - 2];
+    }
+  }
+  // prefer state if present, else city. If both absent, use 'an unknown location' (but template expects State, Country)
+  const locPrimary = state || city || null;
+  const locCountry = country || "";
+
+  // Services handling
+  let services = Array.isArray(opts.servicesArr) ? opts.servicesArr.slice() : [];
+  // map to sentence case
+  services = services.map(s => sentenceCase(s));
+  let servicesClause = "";
+  if (!services || services.length === 0) {
+    servicesClause = "It provides a wide range of financial services,";
+  } else {
+    // choose up to 5
+    const chosen = pickItems(services, 5);
+    const joined = joinWithOxford(chosen);
+    servicesClause = `It provides services including ${joined}, and more.`;
+  }
+
+  // Fund types handling
+  let funds = Array.isArray(opts.fundsArr) ? opts.fundsArr.slice() : [];
+  funds = funds.map(f => sentenceCase(f));
+  let fundClause = "";
+  if (!funds || funds.length === 0) {
+    // Replace entire fund type clause with placeholder per instructions.
+    fundClause = "The firm advises various types of funds.";
+  } else {
+    const chosenFunds = pickItems(funds, 4);
+    const joinedFunds = joinWithOxford(chosenFunds);
+    const verb = (chosenFunds.length === 1) ? "is" : "are";
+    // decide singular/plural phrasing as requested
+    fundClause = `The fund ${chosenFunds.length === 1 ? "type" : "types"} advised by the firm ${verb} ${joinedFunds}, among others.`;
+  }
+
+  // Assemble final sentence EXACTLY in template order:
+  // "[Firm Name] is [a/an] [Firm Type] headquartered in [State], [Country]. It provides services including [...], and more. The fund type(s) advised by the firm [is/are] [...], among others."
+  const locationPart = locPrimary ? `${locPrimary}, ${locCountry}` : (locCountry ? `${locCountry}` : "an unknown location");
+  // Capitalize firmTypeNormalized appropriately (already Title Case)
+  const firstSentence = `${firmName} is ${article} ${firmTypeNormalized} headquartered in ${locationPart}.`;
+
+  // If we used placeholder for servicesClause, ensure it ends with a space/separator consistent with template.
+  // The template expects the services sentence to be present before the fund clause.
+  // We built servicesClause earlier to either be placeholder or the normal 'It provides services including ...'
+  // Ensure punctuation: if servicesClause already ends with '.', keep it; otherwise add a period.
+  let servicesSentence = servicesClause;
+  if (!servicesSentence.endsWith(".")) servicesSentence = servicesSentence.endsWith(",") ? servicesSentence + " and more." : servicesSentence + ".";
+  // If servicesClause already had 'and more.' we don't alter it.
+
+  // If fundClause is the placeholder "The firm advises various types of funds.", it fits the template replacement.
+  const about = `${firstSentence} ${servicesSentence} ${fundClause}`;
+  return about;
+}
+
+// Main run: scrape page, call backend, write back results + build about
+async function runEnrich() {
+  setStatus("Starting scrape...");
+  try {
+    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tabs || !tabs.length) {
+      setStatus("No active tab found.");
+      return;
+    }
+    const tab = tabs[0];
+
+    // Scrape page fields (HQ, alt offices, services, funds, firm name/type)
+    const [{ result: scraped } = {}] = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      world: "MAIN",
+      func: () => {
+        const get = sel => {
+          const el = document.querySelector(sel);
+          if (!el) return null;
+          return ("value" in el) ? el.value.trim() : el.innerText.trim();
+        };
+
+        const hq_raw = get("#hq_address");
+        const hq_phone = get("#phone") || get("#hq_phone");
+        const hq_fax = get("#fax") || get("#hq_fax");
+        const hq_website = get("#hq_website");
+        const hq_email = get("#hq_email");
+
+        const firmName = get("#firm_name") || get("#firm_name_display") || get(".firm-name");
+
+        const firmType = get("#firm_type") || get(".firm-type") || null;
+
+        const services = Array.from(document.querySelectorAll("#services_offered input[type=checkbox]"))
+          .filter(i => i.checked).map(i => i.value);
+
+        const funds = Array.from(document.querySelectorAll("#funds_serviced input[type=checkbox]"))
+          .filter(i => i.checked).map(i => i.value);
+
+        const alt_addresses = Array.from(document.querySelectorAll(".alt-office-address"));
+        const alt_offices = alt_addresses.map(addrEl => {
+          const row = addrEl.closest("div") || addrEl.parentElement;
+          const phoneEl = row ? row.querySelector(".alt-office-phone") : null;
+          const faxEl = row ? row.querySelector(".alt-office-fax") : null;
+          const webEl = row ? row.querySelector(".alt-office-web") : null;
+          const emailEl = row ? row.querySelector(".alt-office-email") : null;
+          return {
+            raw: (addrEl && addrEl.value) ? addrEl.value.trim() : null,
+            phone: (phoneEl && phoneEl.value) ? phoneEl.value.trim() : null,
+            fax: (faxEl && faxEl.value) ? faxEl.value.trim() : null,
+            website: (webEl && webEl.value) ? webEl.value.trim() : null,
+            email: (emailEl && emailEl.value) ? emailEl.value.trim() : null
+          };
+        });
+
+        return {
+          ok: true,
+          hq: { raw: hq_raw || null, phone: hq_phone || null, fax: hq_fax || null, website: hq_website || null, email: hq_email || null },
+          alt_offices: alt_offices,
+          firm_name: firmName,
+          firm_type: firmType,
+          services: services,
+          funds: funds
+        };
       }
-    };
-
-    console.log('[Preqin Enricher] Sending HQ payload to backend:', hqPayload);
-
-    const respHq = await fetch(BACKEND_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(hqPayload)
     });
 
-    if (!respHq.ok) {
-      const text = await respHq.text();
-      console.error('Backend HQ error:', respHq.status, text);
-      logStatus(`Backend HQ error (${respHq.status}). Body:\n${text}`);
+    if (!scraped || !scraped.ok) {
+      setStatus("Scrape failed or returned nothing.");
+      console.log("scraped raw:", scraped);
       return;
     }
 
-    hqEnriched = await respHq.json();
-    console.log('[Preqin Enricher] HQ enrichment response:', hqEnriched);
+    const payload = { hq: scraped.hq, alt_offices: scraped.alt_offices || [], firm_name: scraped.firm_name || null, firm_type: scraped.firm_type || null, services: scraped.services || [], funds: scraped.funds || [] };
 
-    // ---- Enrich Alternate Offices ----
-    altEnriched = [];
+    console.log("Payload to backend:", payload);
+    setStatus("Posting to backend...");
 
-    for (const office of altSources) {
-      const altPayload = {
-        hq: {
-          country: office.country,
-          phone: office.phone,
-          fax: office.fax
-        }
-      };
+    const res = await fetch("http://127.0.0.1:8000/enrich", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }).catch(e => { throw new Error("Network error: " + e.message); });
 
-      console.log(
-        `[Preqin Enricher] Sending alt office payload (index ${office.index}) to backend:`,
-        altPayload
-      );
-
-      const respAlt = await fetch(BACKEND_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(altPayload)
-      });
-
-      if (!respAlt.ok) {
-        const textAlt = await respAlt.text();
-        console.error(
-          `Backend alt office error (index ${office.index}):`,
-          respAlt.status,
-          textAlt
-        );
-        altEnriched.push({
-          index: office.index,
-          label: office.label,
-          error: true,
-          errorStatus: respAlt.status,
-          errorBody: textAlt
-        });
-      } else {
-        const dataAlt = await respAlt.json();
-        altEnriched.push({
-          index: office.index,
-          label: office.label,
-          response: dataAlt
-        });
-      }
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      setStatus(`Backend error ${res.status}`);
+      console.error("backend body:", body);
+      return;
     }
+    const json = await res.json();
+    console.log("Backend response:", json);
 
-    logStatus(
-      'Enrichment success.\n\nHQ:\n' +
-      JSON.stringify(hqEnriched, null, 2) +
-      '\n\nAlternate offices enriched:\n' +
-      JSON.stringify(altEnriched, null, 2)
-    );
-  } catch (err) {
-    console.error('Enrichment failed:', err);
-    logStatus('ERROR: Enrichment failed: ' + err.message);
-  }
-}
+    // Inject HQ formatted phone/fax/currency
+    const formattedPhone = json.formatted_phone || json.formattedPhone || null;
+    const formattedFax = json.formatted_fax || json.formattedFax || null;
+    const currency = json.currency || json.firm_currency || null;
 
-/**
- * "Apply enriched data to page"
- *
- * Writes enriched HQ + alternate office data back into the page
- * using chrome.scripting.executeScript.
- */
-function handleApplyToPage() {
-  if (!hqEnriched && !altEnriched.length) {
-    alert('No enriched data available. Run enrichment first.');
-    return;
-  }
-
-  logStatus('Applying enriched data back to page...', false);
-
-  getActiveTabId((tabId) => {
-    if (!tabId) return;
-
-    chrome.scripting.executeScript(
-      {
-        target: { tabId },
-        func: applyAllEnrichedToPage,
-        args: [hqEnriched, altEnriched]
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      world: "MAIN",
+      func: (phoneVal, faxVal, currencyVal) => {
+        const set = (sel, val) => {
+          const el = document.querySelector(sel);
+          if (!el) return false;
+          if ("value" in el) el.value = val || "";
+          else el.innerText = val || "";
+          try { el.dispatchEvent(new Event("input", { bubbles: true })); } catch (e) {}
+          try { el.dispatchEvent(new Event("change", { bubbles: true })); } catch (e) {}
+          return true;
+        };
+        set("#phone", phoneVal);
+        set("#fax", faxVal);
+        set("#currency", currencyVal);
       },
-      () => {
-        if (chrome.runtime.lastError) {
-          console.error('Error applying enriched data to page:', chrome.runtime.lastError);
-          logStatus('ERROR applying enriched data. See DevTools console.');
-        } else {
-          console.log('[Preqin Enricher] Enriched HQ + alt office data applied to page.');
-          logStatus('Enriched HQ + alternate office data applied to page.');
-        }
-      }
-    );
-  });
+      args: [formattedPhone, formattedFax, currency]
+    });
+
+    setStatus("Applied HQ values. Processing alternate offices...");
+
+    // Inject alt_offices formatted phones/faxes (map by index)
+    const alt_offices_resp = json.alt_offices || [];
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      world: "MAIN",
+      func: (altList) => {
+        const addrEls = Array.from(document.querySelectorAll(".alt-office-address"));
+        addrEls.forEach((addrEl, idx) => {
+          const row = addrEl.closest("div") || addrEl.parentElement;
+          const phoneEl = row ? row.querySelector(".alt-office-phone") : null;
+          const faxEl = row ? row.querySelector(".alt-office-fax") : null;
+          const info = altList[idx] || {};
+          const fp = info.formatted_phone || info.formattedPhone || info.formatted || null;
+          const ff = info.formatted_fax || info.formattedFax || null;
+          if (phoneEl && fp) {
+            if ("value" in phoneEl) phoneEl.value = fp;
+            else phoneEl.innerText = fp;
+            try { phoneEl.dispatchEvent(new Event("input", { bubbles: true })); } catch (e) {}
+            try { phoneEl.dispatchEvent(new Event("change", { bubbles: true })); } catch (e) {}
+          }
+          if (faxEl && ff) {
+            if ("value" in faxEl) faxEl.value = ff;
+            else faxEl.innerText = ff;
+            try { faxEl.dispatchEvent(new Event("input", { bubbles: true })); } catch (e) {}
+            try { faxEl.dispatchEvent(new Event("change", { bubbles: true })); } catch (e) {}
+          }
+        });
+        return true;
+      },
+      args: [alt_offices_resp]
+    });
+
+    setStatus("Alternate offices updated. Building About section...");
+
+    // Build About using page-scraped services/funds/firm info and backend hq_parsed
+    const aboutOpts = {
+      firmName: payload.firm_name || "",
+      firmTypeRaw: payload.firm_type || "",
+      hq_parsed: json.hq_parsed || {},
+      hq_raw: payload.hq.raw || "",
+      servicesArr: payload.services || [],
+      fundsArr: payload.funds || []
+    };
+    const aboutText = buildAboutSentence(aboutOpts);
+    console.log("Generated About:", aboutText);
+
+    // Inject About into page
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      world: "MAIN",
+      func: (text) => {
+        const el = document.querySelector("#about_section");
+        if (!el) return false;
+        if ("value" in el) el.value = text;
+        else el.innerText = text;
+        try { el.dispatchEvent(new Event("input", { bubbles: true })); } catch (e) { }
+        try { el.dispatchEvent(new Event("change", { bubbles: true })); } catch (e) { }
+        return true;
+      },
+      args: [aboutText]
+    });
+
+    setStatus("Done — About populated.");
+  } catch (err) {
+    console.error("runEnrich error:", err);
+    setStatus("Error: " + (err && err.message ? err.message : String(err)));
+  }
 }
-
-// ============================================================
-// Initialization
-// ============================================================
-
-document.addEventListener('DOMContentLoaded', () => {
-  const btnUse = document.getElementById('btn-use-fields-from-page');
-  const btnEnrich = document.getElementById('btn-run-enrichment');
-  const btnApply = document.getElementById('btn-apply-to-page');
-
-  if (btnUse) btnUse.addEventListener('click', handleUseFieldsFromPage);
-  if (btnEnrich) btnEnrich.addEventListener('click', handleRunEnrichment);
-  if (btnApply) btnApply.addEventListener('click', handleApplyToPage);
-
-  logStatus('Popup loaded. Ready.', false);
-});

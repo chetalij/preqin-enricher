@@ -1,17 +1,23 @@
 {
   "manifest_version": 3,
-  "name": "Preqin Enricher",
-  "version": "1.0.0",
-  "description": "Enriches HQ details in Preqin CRM using a local FastAPI backend.",
-  "permissions": [
-    "scripting",
-    "activeTab"
-  ],
-  "host_permissions": [
-    "http://127.0.0.1:8000/*"
-  ],
+  "name": "preqin-enricher",
+  "description": "Local CRM enrichment helper for formatting phone/fax and currency.",
+  "version": "0.1",
+
   "action": {
     "default_popup": "popup.html",
-    "default_title": "Preqin Enricher"
-  }
+    "default_title": "preqin-enricher"
+  },
+
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage"
+  ],
+
+  "host_permissions": [
+    "http://127.0.0.1/*",
+    "http://localhost/*",
+    "<all_urls>"
+  ]
 }
