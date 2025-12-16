@@ -1,4 +1,5 @@
 # backend/app.py
+from utils.ma_extractor import run_ma_extractor
 import logging
 from typing import Any, Dict, List, Optional
 from fastapi import FastAPI
