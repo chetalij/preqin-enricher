@@ -319,6 +319,60 @@ async function runEnrich() {
       args: [aboutText]
     });
 
+    // ---- M&A UI Rendering ----
+const ma = json.m_and_a || null;
+
+await chrome.scripting.executeScript({
+  target: { tabId: tab.id },
+  world: "MAIN",
+  func: (maData) => {
+    const noneEl = document.getElementById("ma-none");
+    const foundEl = document.getElementById("ma-found");
+    const snippetEl = document.getElementById("ma-snippet");
+    const confEl = document.getElementById("ma-confidence");
+    const srcEl = document.getElementById("ma-sources");
+
+    if (!noneEl || !foundEl) return;
+
+    // If nothing detected
+    if (!maData || !maData.ma_snippet) {
+      noneEl.style.display = "block";
+      foundEl.style.display = "none";
+      return;
+    }
+
+    // If detected
+    noneEl.style.display = "none";
+    foundEl.style.display = "block";
+
+    if (snippetEl) snippetEl.textContent = maData.ma_snippet || "";
+    if (confEl) confEl.textContent = maData.confidence || "";
+
+    if (srcEl) {
+      srcEl.innerHTML = "";
+      (maData.provenance || []).forEach(src => {
+        const p = document.createElement("p");
+        const a = document.createElement("a");
+        a.href = src.url;
+        a.target = "_blank";
+        a.rel = "noopener noreferrer";
+        a.textContent = src.url;
+
+        p.appendChild(a);
+
+        if (src.excerpt) {
+          const em = document.createElement("em");
+          em.textContent = ` — ${src.excerpt}`;
+          p.appendChild(em);
+        }
+
+        srcEl.appendChild(p);
+      });
+    }
+  },
+  args: [ma]
+});
+
     setStatus("Done — About populated.");
   } catch (err) {
     console.error("runEnrich error:", err);

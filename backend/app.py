@@ -375,6 +375,11 @@ def enrich_handler(payload: EnrichPayload):
     # Build about section using strict template/rules
     about = build_about_section(firm_name, firm_type, services, funds, parsed_hq)
 
+    ma_result = run_ma_extractor(
+    firm_name=firm_name,
+    official_domains=[]
+)
+
     resp = {
         "formatted_phone": formatted_phone,
         "phone_valid": phone_valid,
@@ -385,6 +390,7 @@ def enrich_handler(payload: EnrichPayload):
         "about": about,
         "hq_parsed": parsed_hq,
         "alt_offices": normalized_alt_offices,
+        "m_and_a": ma_result,
     }
 
     return resp
@@ -392,3 +398,4 @@ def enrich_handler(payload: EnrichPayload):
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
