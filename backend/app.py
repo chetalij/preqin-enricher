@@ -1,5 +1,5 @@
 # backend/app.py
-from utils.ma_extractor import run_ma_extractor
+from utils.ma_web_rag import run_ma_web_rag
 import logging
 from typing import Any, Dict, List, Optional
 from fastapi import FastAPI
@@ -163,7 +163,6 @@ def format_phone_for_region(phone_raw: Optional[str], country_iso: Optional[str]
 def choose_items(items: List[str], max_items: int) -> List[str]:
     if not items:
         return []
-    # Normalize and dedupe while preserving order
     seen = set()
     out = []
     for x in items:
@@ -181,7 +180,6 @@ def choose_items(items: List[str], max_items: int) -> List[str]:
     return out
 
 def oxford_join(items: List[str]) -> str:
-    # join with commas and an "and" before last item per rule
     if not items:
         return ""
     if len(items) == 1:
@@ -196,13 +194,10 @@ def a_or_an(word: Optional[str]) -> str:
     w = word.strip()
     if not w:
         return "a"
-    # Simple heuristic: use vowel letter rule on first character
     first = w[0].lower()
-    # common special-case: words starting with a silent 'h' that sound vowel: 'honest', 'honour'
     silent_h = {"honest", "honour", "honorable", "honourable", "hour"}
     if w.lower() in silent_h:
         return "an"
-    # If acronym/initialism and first char pronounced as vowel sound (e.g., 'M' -> 'em'), check some common letters:
     if w.isupper() and first in {"a", "e", "f", "h", "i", "l", "m", "n", "o", "r", "s", "x"}:
         return "an"
     if first in {"a", "e", "i", "o", "u"}:
@@ -211,33 +206,21 @@ def a_or_an(word: Optional[str]) -> str:
 
 def build_about_section(firm_name: Optional[str], firm_type: Optional[str], services: Optional[List[str]],
                         funds: Optional[List[str]], hq_parsed: Dict[str, Any]) -> str:
-    # Determine location: prefer state, then city, then country
     state = (hq_parsed.get("state") or hq_parsed.get("city") or None)
     country = hq_parsed.get("country") or None
-
-    # If no location, fallback explicitly
     location_state = state or "an unknown location"
     location_country = country or ""
-
-    # Firm name and type guard
     fname = firm_name.strip() if isinstance(firm_name, str) and firm_name.strip() else "The firm"
     ftype = firm_type.strip() if isinstance(firm_type, str) and firm_type.strip() else None
-
-    # Services selection
     services_list = services or []
     services_norm = [s.strip() for s in services_list if s and str(s).strip()]
     selected_services = choose_items(services_norm, 5)
-
-    # Fund types selection
     funds_list = funds or []
     funds_norm = [f.strip() for f in funds_list if f and str(f).strip()]
     selected_funds = choose_items(funds_norm, 4)
 
-    # Build sentences according to strict template and rules
-    # Sentence 1: "[Firm Name] is [a/an] [Firm Type] headquartered in [State], [Country]."
     if ftype:
         art = a_or_an(ftype)
-        # Use the location formatting: prefer state, then country
         if location_country:
             if location_state and location_state != "an unknown location":
                 loc_part = f"{location_state}, {location_country}"
@@ -247,7 +230,6 @@ def build_about_section(firm_name: Optional[str], firm_type: Optional[str], serv
             loc_part = "an unknown location"
         first_sentence = f"{fname} is {art} {ftype} headquartered in {loc_part}."
     else:
-        # If no firm type, keep generic phrasing but follow template as closely as possible
         if location_country:
             if location_state and location_state != "an unknown location":
                 loc_part = f"{location_state}, {location_country}"
@@ -257,19 +239,15 @@ def build_about_section(firm_name: Optional[str], firm_type: Optional[str], serv
             loc_part = "an unknown location"
         first_sentence = f"{fname} is a firm headquartered in {loc_part}."
 
-    # Sentence 2: services clause
     if len(selected_services) >= 1:
         services_text = oxford_join(selected_services)
         second_sentence = f"It provides services including {services_text}, and more."
     else:
-        # fallback placeholder exactly as requested
         second_sentence = "It provides a wide range of financial services."
 
-    # Sentence 3: fund types clause following selection rules
     if len(selected_funds) == 0:
         third_sentence = "The firm advises various types of funds."
     else:
-        # Determine verb and plurality
         if len(selected_funds) == 1:
             verb = "is"
             plurality = "fund type"
@@ -279,7 +257,6 @@ def build_about_section(firm_name: Optional[str], firm_type: Optional[str], serv
         funds_text = oxford_join(selected_funds)
         third_sentence = f"The {plurality} advised by the firm {verb} {funds_text}, among others."
 
-    # Combine strictly in a single block with required punctuation
     about = f"{first_sentence} {second_sentence} {third_sentence}"
     return about
 
@@ -310,6 +287,21 @@ def enrich_handler(payload: EnrichPayload):
     hq_fax = hq.get("fax") or None
     hq_country_field = (hq.get("country") or hq.get("country_name") or hq.get("hq_country") or None)
 
+    # ---------- OFFICIAL DOMAIN EXTRACTION (ADDED) ----------
+    hq_website = hq.get("website") or ""
+    official_domains: List[str] = []
+
+    if hq_website:
+        try:
+            clean = re.sub(r"^https?://", "", hq_website.strip(), flags=re.IGNORECASE)
+            clean = clean.split("/")[0].split("?")[0].split("#")[0]
+            clean = clean.replace("www.", "")
+            if clean:
+                official_domains.append(clean.lower())
+        except Exception:
+            pass
+    # --------------------------------------------------------
+
     if raw_hq_address:
         parsed_hq = parse_address_improved(raw_hq_address) or {}
         if (not parsed_hq.get("country_iso")) and hq_country_field:
@@ -337,7 +329,6 @@ def enrich_handler(payload: EnrichPayload):
 
     currency = user_currency or detect_currency_from_country(parsed_hq.get("country"), parsed_hq.get("country_iso")) or "USD"
 
-    # Normalize alt offices
     normalized_alt_offices = []
     for alt in alt_offices:
         raw = alt.get("raw") or alt.get("address") or alt.get("input_address") or None
@@ -372,13 +363,12 @@ def enrich_handler(payload: EnrichPayload):
             "website": alt.get("website")
         })
 
-    # Build about section using strict template/rules
     about = build_about_section(firm_name, firm_type, services, funds, parsed_hq)
 
-    ma_result = run_ma_extractor(
+    ma_result = run_ma_web_rag(
     firm_name=firm_name,
-    official_domains=[]
-)
+    official_domains=official_domains
+    )
 
     resp = {
         "formatted_phone": formatted_phone,
@@ -398,4 +388,3 @@ def enrich_handler(payload: EnrichPayload):
 @app.get("/health")
 def health():
     return {"status": "ok"}
-
