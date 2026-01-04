@@ -67,6 +67,8 @@ def google_search(query: str, limit: int = 10) -> List[str]:
     Controlled Google Custom Search.
     RETURNS URLS ONLY.
     """
+    print(">>> GOOGLE SEARCH CALLED <<<")
+
     if not GOOGLE_API_KEY or not GOOGLE_CX:
         return []
 
@@ -298,19 +300,19 @@ def run_ma_web_rag(
 
     urls_seen = set()
     for q in queries:
-        urls_seen.update(google_search(q))
+        urls_seen.update(google_search("Microsoft acquisition"))
     
     print(f">>> URLs discovered: {len(urls_seen)} <<<")
 
     for url in urls_seen:
-        logger.info(f"Testing URL: {url}")
+        print(f">>> LOOP URL: {url} <<<")
 
         source_type = is_allowed_domain(url, official_domains)
         if not source_type:
             continue
 
         blocks = fetch_text_blocks(url)
-        logger.info(f"Fetched blocks: {len(blocks)}")
+        print(f">>> BLOCKS COUNT: {len(blocks)} <<<")
 
         if not blocks:
             continue
